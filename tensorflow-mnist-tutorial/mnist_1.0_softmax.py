@@ -13,13 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+import os
 import tensorflow as tf
 
-
+TB_DIR = './Graph'
 print("Tensorflow version " + tf.__version__)
 tf.set_random_seed(0)
 
 def model_fn(features, labels, mode, params):
+    tf.summary.image('image', features)
     W = tf.Variable(tf.zeros([784, 10]))
     b = tf.Variable(tf.zeros([10]))
     XX = tf.reshape(features, [-1, 784])
@@ -37,8 +40,10 @@ def model_fn(features, labels, mode, params):
         predictions = tf.argmax(Y,1)
         accuracy = tf.metrics.accuracy(predictions, labels)
 
-        evalmetrics = {"accuracy": accuracy}
+        evalmetrics = {"accuracy/mnist": accuracy}
         if mode == tf.estimator.ModeKeys.TRAIN:
+            tf.summary.scalar("accuracy/mnist", accuracy[1])
+            tf.summary.scalar("learning_rate", params["learning_rate"])
             optimizer = tf.train.GradientDescentOptimizer(params["learning_rate"])
             train_step = optimizer.minimize(cross_entropy,
                                             global_step=tf.train.get_global_step())
@@ -57,16 +62,11 @@ def model_fn(features, labels, mode, params):
             eval_metric_ops=evalmetrics)
 
 
-def make_input_fn(batch_size, mode, shuffle=False):
-    train, test = tf.keras.datasets.mnist.load_data()
-    if mode == tf.estimator.ModeKeys.TRAIN:
-        mnist_x, mnist_y = train
-    else:
-        mnist_x, mnist_y = test
+def make_input_fn(mnist_x, mnist_y, batch_size, mode, shuffle=False):
     def _input_fn():
         ds = tf.data.Dataset.from_tensor_slices((
-            tf.cast(mnist_x, tf.float32)/256.0, 
-            mnist_y))
+            tf.cast(tf.expand_dims(mnist_x, -1), tf.float32)/256.0, 
+            tf.cast(mnist_y, tf.int32)))
         if mode == tf.estimator.ModeKeys.TRAIN:
             num_epochs = None # indefinitely
         else:
@@ -74,35 +74,41 @@ def make_input_fn(batch_size, mode, shuffle=False):
         if shuffle or mode == tf.estimator.ModeKeys.TRAIN:
             ds = ds.shuffle(5000).repeat(num_epochs).batch(batch_size)
         else:
-            ds = ds.repeat(num_epochs)
+            ds = ds.repeat(num_epochs).batch(batch_size)
         ds = ds.prefetch(2)
         return ds
     return _input_fn
 
 
-def train_and_evaluate(output_dir, hparams):
+def train_and_evaluate(model_dir, hparams):
+    
     estimator = tf.estimator.Estimator(
         model_fn = model_fn,
         params = hparams,
         config= tf.estimator.RunConfig(
-            save_checkpoints_steps = hparams["save_checkpoints_steps"],
+            save_checkpoints_steps = 1000,
             log_step_count_steps=500
             ),
-        model_dir = output_dir
-    )
+        model_dir = model_dir)
+    
+    train, test = tf.keras.datasets.mnist.load_data()
+    
+    train_x, train_y = train
     train_spec = tf.estimator.TrainSpec(
         input_fn = make_input_fn(
+            train_x, train_y,
             hparams['batch_size'],
-            mode = tf.estimator.ModeKeys.TRAIN,
-        ),
-        max_steps = (50000//hparams["batch_size"]) * 50
-    )
+            mode = tf.estimator.ModeKeys.TRAIN),
+        max_steps = (50000//hparams["batch_size"]) * 20)
+    
+    test_x, test_y = test
     eval_spec = tf.estimator.EvalSpec(
         input_fn = make_input_fn(
+            test_x, test_y,
             hparams['batch_size'],
             mode = tf.estimator.ModeKeys.EVAL
         ),
-        steps = 10000//hparams["batch_size"],
+        #steps = 10000//hparams["batch_size"],
         start_delay_secs = 1,
         throttle_secs = 1
     )
@@ -112,9 +118,9 @@ def train_and_evaluate(output_dir, hparams):
 
 if __name__=='__main__':
     params = {
-        "save_checkpoints_steps" : 1000,
         "batch_size": 100,
-        "learning_rate": 0.005
+        "learning_rate": 0.003,
+        "pkeep": 0.75
     }
-
-    train_and_evaluate('tb_logs/mnist_1.0_softmax', params)
+    model_name = 'mnist_1.0'
+    train_and_evaluate(os.path.join(TB_DIR, model_name), params)

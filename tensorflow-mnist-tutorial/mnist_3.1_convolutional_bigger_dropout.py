@@ -1,3 +1,5 @@
+
+
 # encoding: UTF-8
 # Copyright 2016 Google.com
 #
@@ -13,147 +15,152 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import tensorflow as tf
-import tensorflowvisu
 import math
-import mnistdata
+import os
+import tensorflow as tf
+
+TB_DIR = './Graph'
 print("Tensorflow version " + tf.__version__)
 tf.set_random_seed(0)
 
-# Download images and labels into mnist.test (10K images+labels) and mnist.train (60K images+labels)
-mnist = mnistdata.read_data_sets("data", one_hot=True, reshape=False)
+def model_fn(features, labels, mode, params):
+    tf.summary.image('image', features)
 
-# neural network structure for this sample:
-#
-# · · · · · · · · · ·      (input data, 1-deep)                 X [batch, 28, 28, 1]
-# @ @ @ @ @ @ @ @ @ @   -- conv. layer 6x6x1=>6 stride 1        W1 [5, 5, 1, 6]        B1 [6]
-# ∶∶∶∶∶∶∶∶∶∶∶∶∶∶∶∶∶∶∶                                           Y1 [batch, 28, 28, 6]
-#   @ @ @ @ @ @ @ @     -- conv. layer 5x5x6=>12 stride 2       W2 [5, 5, 6, 12]        B2 [12]
-#   ∶∶∶∶∶∶∶∶∶∶∶∶∶∶∶                                             Y2 [batch, 14, 14, 12]
-#     @ @ @ @ @ @       -- conv. layer 4x4x12=>24 stride 2      W3 [4, 4, 12, 24]       B3 [24]
-#     ∶∶∶∶∶∶∶∶∶∶∶                                               Y3 [batch, 7, 7, 24] => reshaped to YY [batch, 7*7*24]
-#      \x/x\x\x/ ✞      -- fully connected layer (relu+dropout) W4 [7*7*24, 200]       B4 [200]
-#       · · · ·                                                 Y4 [batch, 200]
-#       \x/x\x/         -- fully connected layer (softmax)      W5 [200, 10]           B5 [10]
-#        · · ·                                                  Y [batch, 10]
+    # three convolutional layers with their channel counts, and a
+    # fully connected layer (tha last layer has 10 softmax neurons)
+    L = 6  # first convolutional layer output depth
+    M = 12  # second convolutional layer output depth
+    N = 24  # third convolutional layer
+    O = 200  # fully connected layer
 
-# input X: 28x28 grayscale images, the first dimension (None) will index the images in the mini-batch
-X = tf.placeholder(tf.float32, [None, 28, 28, 1])
-# correct answers will go here
-Y_ = tf.placeholder(tf.float32, [None, 10])
-# variable learning rate
-lr = tf.placeholder(tf.float32)
-# Probability of keeping a node during dropout = 1.0 at test time (no dropout) and 0.75 at training time
-pkeep = tf.placeholder(tf.float32)
-# step for variable learning rate
-step = tf.placeholder(tf.int32)
+    weights = {
+        "W1" : tf.Variable(tf.truncated_normal([6, 6, 1, L], stddev=0.1)),  # 5x5 patch, 1 input channel, K output channels
+        "W2" : tf.Variable(tf.truncated_normal([5, 5, L, M], stddev=0.1)),
+        "W3" : tf.Variable(tf.truncated_normal([4, 4, M, N], stddev=0.1)),
+        "W4" : tf.Variable(tf.truncated_normal([7 * 7 * N, O], stddev=0.1)),
+        "W5" : tf.Variable(tf.truncated_normal([O, 10], stddev=0.1))
+    }
+    biases = {
+        "B1" : tf.Variable(tf.ones([L])/10),
+        "B2" : tf.Variable(tf.ones([M])/10),
+        "B3" : tf.Variable(tf.ones([N])/10),
+        "B4" : tf.Variable(tf.ones([O])/10),
+        "B5" : tf.Variable(tf.ones([10])/10)
+    }   
 
-# three convolutional layers with their channel counts, and a
-# fully connected layer (the last layer has 10 softmax neurons)
-K = 6  # first convolutional layer output depth
-L = 12  # second convolutional layer output depth
-M = 24  # third convolutional layer
-N = 200  # fully connected layer
+    # The model
+    stride = 1  # output is 28x28
+    Y1 = tf.nn.relu(tf.nn.conv2d(features, weights["W1"], strides=[1, stride, stride, 1], padding='SAME') + biases["B1"])
+    stride = 2  # output is 14x14
+    Y2 = tf.nn.relu(tf.nn.conv2d(Y1, weights["W2"], strides=[1, stride, stride, 1], padding='SAME') + biases["B2"])
+    stride = 2  # output is 7x7
+    Y3 = tf.nn.relu(tf.nn.conv2d(Y2, weights["W3"], strides=[1, stride, stride, 1], padding='SAME') + biases["B3"])
 
-W1 = tf.Variable(tf.truncated_normal([6, 6, 1, K], stddev=0.1))  # 6x6 patch, 1 input channel, K output channels
-B1 = tf.Variable(tf.constant(0.1, tf.float32, [K]))
-W2 = tf.Variable(tf.truncated_normal([5, 5, K, L], stddev=0.1))
-B2 = tf.Variable(tf.constant(0.1, tf.float32, [L]))
-W3 = tf.Variable(tf.truncated_normal([4, 4, L, M], stddev=0.1))
-B3 = tf.Variable(tf.constant(0.1, tf.float32, [M]))
+    # reshape the output from the third convolution for the fully connected layer
+    YY = tf.reshape(Y3, shape=[-1, 7 * 7 * N])
 
-W4 = tf.Variable(tf.truncated_normal([7 * 7 * M, N], stddev=0.1))
-B4 = tf.Variable(tf.constant(0.1, tf.float32, [N]))
-W5 = tf.Variable(tf.truncated_normal([N, 10], stddev=0.1))
-B5 = tf.Variable(tf.constant(0.1, tf.float32, [10]))
+    Y4 = tf.nn.relu(tf.matmul(YY, weights["W4"]) + biases["B4"])
+    Y4d = tf.nn.dropout(Y4, params["pkeep"] if mode == tf.estimator.ModeKeys.TRAIN else 1.0)
+    Ylogits = tf.matmul(Y4d, weights["W5"]) + biases["B5"]
+    Y = tf.nn.softmax(Ylogits)
+    
+    for k, w in weights.items():
+        tf.summary.histogram(k, w)
+    for k, b in biases.items():
+        tf.summary.histogram(k, b)
+        
+    if mode == tf.estimator.ModeKeys.TRAIN or mode == tf.estimator.ModeKeys.EVAL:
+        # cross-entropy loss function (= -sum(Y_i * log(Yi)) ), normalised for batches of 100  images
+        # TensorFlow provides the softmax_cross_entropy_with_logits function to avoid numerical instability
+        # problems with log(0) which is NaN
+        cross_entropy = tf.nn.softmax_cross_entropy_with_logits_v2(logits=Ylogits, labels=tf.one_hot(labels, 10))
+        cross_entropy = tf.reduce_mean(cross_entropy)*100
+        # % of correct answers found in batch
+        predictions = tf.argmax(Y,1)
+        accuracy = tf.metrics.accuracy(predictions, labels)
 
-# The model
-stride = 1  # output is 28x28
-Y1 = tf.nn.relu(tf.nn.conv2d(X, W1, strides=[1, stride, stride, 1], padding='SAME') + B1)
-stride = 2  # output is 14x14
-Y2 = tf.nn.relu(tf.nn.conv2d(Y1, W2, strides=[1, stride, stride, 1], padding='SAME') + B2)
-stride = 2  # output is 7x7
-Y3 = tf.nn.relu(tf.nn.conv2d(Y2, W3, strides=[1, stride, stride, 1], padding='SAME') + B3)
+        evalmetrics = {"accuracy/mnist": accuracy}
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            tf.summary.scalar("accuracy/mnist", accuracy[1])
+            # the learning rate is: # 0.0001 + 0.003 * (1/e)^(step/2000)), i.e. exponential decay from 0.003->0.0001
+            lr = 0.0001 +  tf.train.exponential_decay(params["learning_rate"], tf.train.get_global_step(), 2000, 1/math.e)
+            tf.summary.scalar("learning_rate", lr)
+            optimizer = tf.train.AdamOptimizer(lr)
+            train_step = optimizer.minimize(cross_entropy,
+                                            global_step=tf.train.get_global_step())
+        else:
+            train_step = None
+    else:
+        cross_entropy = None
+        train_step = None
+        evalmetrics = None
 
-# reshape the output from the third convolution for the fully connected layer
-YY = tf.reshape(Y3, shape=[-1, 7 * 7 * M])
-
-Y4 = tf.nn.relu(tf.matmul(YY, W4) + B4)
-YY4 = tf.nn.dropout(Y4, pkeep)
-Ylogits = tf.matmul(YY4, W5) + B5
-Y = tf.nn.softmax(Ylogits)
-
-# cross-entropy loss function (= -sum(Y_i * log(Yi)) ), normalised for batches of 100  images
-# TensorFlow provides the softmax_cross_entropy_with_logits function to avoid numerical stability
-# problems with log(0) which is NaN
-cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits=Ylogits, labels=Y_)
-cross_entropy = tf.reduce_mean(cross_entropy)*100
-
-# accuracy of the trained model, between 0 (worst) and 1 (best)
-correct_prediction = tf.equal(tf.argmax(Y, 1), tf.argmax(Y_, 1))
-accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-
-# matplotlib visualisation
-allweights = tf.concat([tf.reshape(W1, [-1]), tf.reshape(W2, [-1]), tf.reshape(W3, [-1]), tf.reshape(W4, [-1]), tf.reshape(W5, [-1])], 0)
-allbiases  = tf.concat([tf.reshape(B1, [-1]), tf.reshape(B2, [-1]), tf.reshape(B3, [-1]), tf.reshape(B4, [-1]), tf.reshape(B5, [-1])], 0)
-I = tensorflowvisu.tf_format_mnist_images(X, Y, Y_)
-It = tensorflowvisu.tf_format_mnist_images(X, Y, Y_, 1000, lines=25)
-datavis = tensorflowvisu.MnistDataVis()
-
-# training step, the learning rate is a placeholder
-# the learning rate is: # 0.0001 + 0.003 * (1/e)^(step/2000)), i.e. exponential decay from 0.003->0.0001
-lr = 0.0001 +  tf.train.exponential_decay(0.003, step, 2000, 1/math.e)
-train_step = tf.train.AdamOptimizer(lr).minimize(cross_entropy)
-
-# init
-init = tf.global_variables_initializer()
-sess = tf.Session()
-sess.run(init)
+    return tf.estimator.EstimatorSpec(
+            mode=mode,
+            predictions={"classid": predictions},
+            loss=cross_entropy,
+            train_op=train_step,
+            eval_metric_ops=evalmetrics)
 
 
-# You can call this function in a loop to train the model, 100 images at a time
-def training_step(i, update_test_data, update_train_data):
+def make_input_fn(batch_size, mode, shuffle=False):
+    train, test = tf.keras.datasets.mnist.load_data()
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        mnist_x, mnist_y = train
+    else:
+        mnist_x, mnist_y = test
+    def _input_fn():
+        ds = tf.data.Dataset.from_tensor_slices((
+            tf.cast(mnist_x, tf.float32)/256.0, 
+            mnist_y))
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            num_epochs = None # indefinitely
+        else:
+            num_epochs = 1 # end-of-input after this
+        if shuffle or mode == tf.estimator.ModeKeys.TRAIN:
+            ds = ds.shuffle(5000).repeat(num_epochs).batch(batch_size)
+        else:
+            ds = ds.repeat(num_epochs)
+        ds = ds.prefetch(2)
+        return ds
+    return _input_fn
 
-    # training on batches of 100 images with 100 labels
-    batch_X, batch_Y = mnist.train.next_batch(100)
 
-    # compute training values for visualisation
-    if update_train_data:
-        a, c, im, w, b, l = sess.run([accuracy, cross_entropy, I, allweights, allbiases, lr],
-                                  feed_dict={X: batch_X, Y_: batch_Y, pkeep: 1.0, step: i})
-        print(str(i) + ": accuracy:" + str(a) + " loss: " + str(c) + " (lr:" + str(l) + ")")
-        datavis.append_training_curves_data(i, a, c)
-        datavis.update_image1(im)
-        datavis.append_data_histograms(i, w, b)
+def train_and_evaluate(output_dir, hparams):
+    estimator = tf.estimator.Estimator(
+        model_fn = model_fn,
+        params = hparams,
+        config= tf.estimator.RunConfig(
+            save_checkpoints_steps = 1000,
+            log_step_count_steps=500
+            ),
+        model_dir = output_dir
+    )
+    train_spec = tf.estimator.TrainSpec(
+        input_fn = make_input_fn(
+            hparams['batch_size'],
+            mode = tf.estimator.ModeKeys.TRAIN,
+        ),
+        max_steps = (50000//hparams["batch_size"]) * 20
+    )
+    eval_spec = tf.estimator.EvalSpec(
+        input_fn = make_input_fn(
+            hparams['batch_size'],
+            mode = tf.estimator.ModeKeys.EVAL
+        ),
+        steps = 10000//hparams["batch_size"],
+        start_delay_secs = 1,
+        throttle_secs = 1
+    )
 
-    # compute test values for visualisation
-    if update_test_data:
-        a, c, im = sess.run([accuracy, cross_entropy, It], {X: mnist.test.images, Y_: mnist.test.labels, pkeep: 1.0})
-        print(str(i) + ": ********* epoch " + str(i*100//mnist.train.images.shape[0]+1) + " ********* test accuracy:" + str(a) + " test loss: " + str(c))
-        datavis.append_test_curves_data(i, a, c)
-        datavis.update_image2(im)
+    tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)
 
-    # the backpropagation training step
-    sess.run(train_step, {X: batch_X, Y_: batch_Y, step: i, pkeep: 0.75})
 
-datavis.animate(training_step, 10001, train_data_update_freq=20, test_data_update_freq=100)
-
-# to save the animation as a movie, add save_movie=True as an argument to datavis.animate
-# to disable the visualisation use the following line instead of the datavis.animate line
-# for i in range(10000+1): training_step(i, i % 100 == 0, i % 20 == 0)
-
-print("max test accuracy: " + str(datavis.get_max_test_accuracy()))
-
-## All runs 10K iterations:
-# layers 4 8 12 200, patches 5x5str1 5x5str2 4x4str2 best 0.989
-# layers 4 8 12 200, patches 5x5str1 4x4str2 4x4str2 best 0.9892
-# layers 6 12 24 200, patches 5x5str1 4x4str2 4x4str2 best 0.9908 after 10000 iterations but going downhill from 5000 on
-# layers 6 12 24 200, patches 5x5str1 4x4str2 4x4str2 dropout=0.75 best 0.9922  (but above 0.99 after 1400 iterations only)
-# layers 4 8 12 200, patches 5x5str1 4x4str2 4x4str2 dropout=0.75, best 0.9914 at 13700 iterations
-# layers 9 16 25 200, patches 5x5str1 4x4str2 4x4str2 dropout=0.75, best 0.9918 at 10500 (but 0.99 at 1500 iterations already, 0.9915 at 5800)
-# layers 9 16 25 300, patches 5x5str1 4x4str2 4x4str2 dropout=0.75, best 0.9916 at 5500 iterations (but 0.9903 at 1200 iterations already)
-# attempts with 2 fully-connected layers: no better 300 and 100 neurons, dropout 0.75 and 0.5, 6x6 5x5 4x4 patches no better
-# layers 6 12 24 200, patches 6x6str1 5x5str2 4x4str2 no dropout best 0.9906 after 3100 iterations (avove 0.99 from iteration 1400)
-#*layers 6 12 24 200, patches 6x6str1 5x5str2 4x4str2 dropout=0.75 best 0.9928 after 12800 iterations (but consistently above 0.99 after 1300 iterations only, 0.9916 at 2300 iterations, 0.9921 at 5600, 0.9925 at 20000)
-#*same with dacaying learning rate 0.003-0.0001-2000: best 0.9931 (on other runs max accuracy 0.9921, 0.9927, 0.9935, 0.9929, 0.9933)
-
+if __name__=='__main__':
+    params = {
+        "batch_size": 100,
+        "learning_rate": 0.003,
+        "pkeep": 0.75
+    }
+    model_name = 'mnist_3.0'
+    train_and_evaluate(os.path.join(TB_DIR, model_name), params)
