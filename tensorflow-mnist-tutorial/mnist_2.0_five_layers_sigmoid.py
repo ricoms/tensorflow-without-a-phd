@@ -52,9 +52,9 @@ def model_fn(features, labels, mode, params):
     Y4 = tf.nn.sigmoid(tf.matmul(Y3, weights["W4"]) + biases["B4"])
     Y  = tf.nn.softmax(tf.matmul(Y4, weights["W5"]) +  biases["B5"])
       
-    for _, w in weights.items():
+    for k, w in weights.items():
         tf.summary.histogram(k, w)
-    for _, b in biases.items():
+    for k, b in biases.items():
         tf.summary.histogram(k, b)
         
     if mode == tf.estimator.ModeKeys.TRAIN or mode == tf.estimator.ModeKeys.EVAL:
